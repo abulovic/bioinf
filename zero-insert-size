@@ -1,0 +1,108 @@
+#!/usr/bin/env python
+
+'''
+zero-insert-size is a script for analysis of the mate-paired reads
+with, well, zero insert size.
+It takes two mate-pair sequence files and a directory with the ids of
+the particular sequence distances in the format:
+xxx-dist-reads.txt where xxx is the integer distance between the sequences.
+It makes certain that the reads are actually zero insert size, asserting
+that the 3' and 5' ends match.
+Those reads which satisfy the above stated criteria get output in the
+output directory in the input format with a name indicative of the distance
+in question.
+'''
+
+import os
+import sys
+
+from itertools import izip
+from contextlib import nested
+from collections import defaultdict
+
+from Bio import SeqIO
+from Bio import pairwise2
+
+def get_dist2id(input_dir):
+	dist2read = defaultdict(list)
+	read2dist = {}
+
+	for fname in os.listdir(input_dir):
+		dist = fname.split('-')[0]
+		try:
+			dist = int(dist)
+		except ValueError:
+			continue
+		with open(os.path.sep.join((input_dir, fname))) as fin:
+			for line in fin:
+				line = line.strip()
+				id_ = line if ' ' not in line else line.split(' ')[0]
+				dist2read[dist].append(id_)
+				read2dist[id_] = dist
+
+	return dist2read, read2dist
+
+def is_record_interesting(read_id, read2dist, dist_limit):
+	if read_id not in read2dist:
+		return False
+	dist = read2dist[read_id]
+	if dist > 0 and dist < dist_limit:
+		return True
+	return False
+
+def main():
+	if len(sys.argv) < 7:
+		print __doc__
+		print 'Usage: %s <READS-FILE-1> <READS-FILE-2> <FORMAT> <DIST-LIMIT> <INPUT-DIR> <OUTPUT-FILE>' % sys.argv[0]
+		sys.exit(-1)
+
+	infile1 = sys.argv[1]
+	infile2 = sys.argv[2]
+	format = sys.argv[3]
+	dist_limit = int(sys.argv[4])
+	input_dir = sys.argv[5]
+	output_file = sys.argv[6]
+
+	dist2read, read2dist = get_dist2id(input_dir)
+	#open_files = {}
+	#for dist in filter(lambda dist: dist <= dist_limit and dist != 0, dist2read.keys()):
+	#	open_files[dist] = (open(os.path.sep.join((output_dir, '%03d-dist-r1.%s' % (dist, format))), 'w'),
+	#						open(os.path.sep.join((output_dir, '%03d-dist-r2.%s' % (dist, format))), 'w'))
+	#	print dist, len(dist2read[dist])
+
+	non_zero = 0
+	zero = 0
+	with nested(open(infile1), open(infile2), open(output_file, 'w')) as (fin1, fin2, fout):
+		records1 = SeqIO.parse(fin1, format)
+		records2 = SeqIO.parse(fin2, format)
+		for rec1, rec2 in izip(records1, records2):
+			if is_record_interesting(rec1.id, read2dist, dist_limit):
+				seq1 = rec1.seq
+				seq2 = rec2.seq.reverse_complement()
+				aln = pairwise2.align.globalxx(seq1, seq2, one_alignment_only=True)[0]
+				aln_seq1, aln_seq2 = aln[0:2]
+				print rec1.id
+				print 'Sequence len:', len(seq1)
+				if aln_seq1.startswith('-') or aln_seq1.endswith('-') or\
+				   aln_seq2.startswith('-') or aln_seq2.endswith('-'):
+					print 'POSSIBLE NON-ZERO-INSERT-SIZE'
+					non_zero += 1
+				else:
+					fout.write('%s\n' % rec1.id)
+					fout.write('Sequence len: %d\n' % len(seq1))
+					fout.write('Error: %d\n' % abs(int(aln[2] - len(seq1))))
+					fout.write(pairwise2.format_alignment(*aln))
+					fout.write('\n')
+					zero += 1
+				print pairwise2.format_alignment(*aln)
+
+	print 'zero', zero
+	print 'non_zero', non_zero
+
+	#for (f1, f2) in open_files.values():
+	#	f1.close()
+	#	f2.close()
+
+
+if __name__ == '__main__':
+	main()
