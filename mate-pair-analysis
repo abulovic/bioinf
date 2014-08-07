@@ -1,0 +1,74 @@
+#!/usr/bin/env python
+
+'''
+mate-pair-analysis is a script which takes two files containing mate-pairs in
+fasta / fastq format and analyzes the difference between the identical-length reads.
+It stores all the read ids in the folder specified by the user in the format:
+xxx-dist-reads.txt where xxx is the distance between the two sequences.
+'''
+
+import os
+import sys
+import time
+from itertools import izip
+from contextlib import nested
+from collections import defaultdict
+
+from Bio import SeqIO
+from Bio import pairwise2
+
+
+def main():
+	if len(sys.argv) < 5:
+		print __doc__
+		print 'Usage: mate-pair-analysis <READ-FILE-1> <READ-FILE-2> <FORMAT> <OUTPUT-DIR>\n'
+		sys.exit(-1)
+
+	reads1 = sys.argv[1]
+	reads2 = sys.argv[2]
+	format = sys.argv[3]
+	output_dir = sys.argv[4]
+
+	dist2read = defaultdict(list)
+	read2dist = {}
+
+	different_len_reads = 0
+	equal_len_reads = 0
+	start = time.time()
+	with nested(open(reads1), open(reads2)) as (r1, r2):
+		records1 = SeqIO.parse(r1, format)
+		records2 = SeqIO.parse(r2, format)
+		i = 0
+		for rec1, rec2 in izip(iter(records1), iter(records2)):
+			seq1 = rec1.seq
+			seq2 = rec2.seq
+			if len(seq1) != len(seq2):
+				different_len_reads += 1
+				continue
+			equal_len_reads += 1
+			score = pairwise2.align.globalxx(seq1, seq2.reverse_complement(), one_alignment_only=True, score_only=True)
+			diff = abs(int(score) - len(seq1))
+			dist2read[diff].append(rec1.description)
+			read2dist[rec1.id] = diff
+			print 'Processing %5d. mate pair...' % (equal_len_reads)
+	stop = time.time()
+	print 'Analysis lasted:', stop-start
+	print sum(map(lambda l: len(l), dist2read.values()))
+
+
+	with open('mate-pair-stats.txt', 'w') as fout:
+		fout.write('Analysis lasted    : %.4f\n' % (stop-start))
+		fout.write('Total reads        : %d\n' % (equal_len_reads + different_len_reads))
+		fout.write('Equal len reads    : %d\n' % equal_len_reads)
+		fout.write('Different len reads: %d\n\n' % different_len_reads)
+		for dist, ids in dist2read.iteritems():
+			fout.write('Dist: %3d: %5d reads.\n' % (dist, len(ids)))
+
+	for dist, ids in dist2read.iteritems():
+		with open(os.path.sep.join((output_dir, '%03d-dist-reads.txt' % dist)), 'w') as fout:
+			for id_ in ids:
+				fout.write('%s\n' % id_)
+
+
+if __name__ == '__main__':
+	main()
