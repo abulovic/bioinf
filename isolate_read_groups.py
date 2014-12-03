@@ -12,9 +12,13 @@ import sys
 import math
 from collections import defaultdict
 
+import matplotlib
+#matplotlib.use('Agg')
+
 import pylab as plab
+import matplotlib.pyplot as plt
 from numpy import NaN, Inf, arange, isscalar, asarray, array
-from scipy.signal import argrelextrema
+from scipy.signal import argrelextrema, correlate
 import pysam
 
 WINDOW_SIZE = 100
@@ -62,6 +66,8 @@ def peakdet(v, delta, x = None):
 
 
 def process_read(read, pos_distr, interesting_len=WINDOW_SIZE):
+	if read.aend is None:
+		return
 	start = read.aend - read.alen
 	end = read.aend
 	for i in xrange(start, end - interesting_len):
@@ -98,18 +104,56 @@ def get_entropy(probs_distribution, scaled=False):
 		entropy[loc] = calc_entropy(probs)
 		if scaled:
 			entropy[loc] *= total_reads
-	max_entropy = max(entropy)
-	entropy = map(lambda e: e / max_entropy, entropy)
+	if scaled:
+		max_entropy = max(entropy)
+		entropy = map(lambda e: e / max_entropy, entropy)
 	return entropy
 
 
-def plot_multimodal_read_distr(x, y, lmx, lmy):
-	plab.figure()
+def plot_multimodal_read_distr(x, y, lmx, lmy, entropy):
+	f = plab.figure()
 	plab.title('Genome locations with 2-modal read distributions, window length = %d' % WINDOW_SIZE)
-	plab.plot(x, y)
+	plab.plot(x, y, label='2nd/1st ratio')
 	plab.hold(True)
-	plab.plot(lmx, lmy, 'ro')
-	plab.axis([0, len(y), 0, 2])
+	plab.plot(lmx, lmy, 'ro', label='local maxima')
+	#plab.axis([0, len(y), 0, 2])
+	plab.plot(entropy, 'g', label='scaled entropy')
+	plab.xlabel('Genome Position')
+	plab.ylabel('2nd/1st [number of identical reads]')
+	plab.legend()
+
+def get_reads_for_loc(bam_in, loc):
+	for read in bam_in.fetch():
+		if not read.alen is None:
+			start = read.aend - read.alen
+			if start <= loc - WINDOW_SIZE / 2 and read.aend >= loc + WINDOW_SIZE / 2:
+				yield read
+
+def create_reads_bam_file(locations, template_bam_file):
+	for loc in locations:
+		fname = "reads_%d.bam" % loc
+		bam_out = pysam.Samfile(fname, 'wb', template=template_bam_file)
+		for read in get_reads_for_loc(template_bam_file, loc):
+			bam_out.write(read)
+		bam_out.close()
+
+	create_idexes_fname = "create_indexes.sh"
+	with open(create_idexes_fname, 'w') as fout:
+		fout.write('#!/bin/bash\n')
+		for loc in locations:
+			fout.write('samtools index reads_%d.bam reads_%d.bai\n' % (loc, loc))
+
+def write_2_numerous(locations, pos_distribution):
+	with open('bimodal_seqs.txt', 'w') as fout:
+		for loc in locations:
+			fout.write('%d\n' % loc)
+			seq_dict = pos_distribution[loc]
+			i = 0
+			for (seq, total) in sorted(seq_dict.items(), key=lambda x: x[1], reverse=True):
+				i += 1
+				if i > 2:
+					break
+				fout.write('%5d: %s\n' % (total, seq))
 
 
 def main():
@@ -134,29 +178,59 @@ def main():
 	# Isolate the positions where there are two or more
 	# groups of reads that map equaly well to some 
 	# position on the reference genome
+	second_reads = []
+	first_reads = []
 	ambiguous = 0
 	multimodal = {}
 	for pos, covs_dict in pos_distribution.iteritems():
 		covs = sorted(covs_dict.values(), reverse=True)
+		first_reads.append(covs[0])
+		if len(covs) > 1:
+			second_reads.append(covs[1])
+		else:
+			second_reads.append(0)
 		if len(covs) > 1 and float(covs[1]) / covs[0] > 0.2 and sum(covs) > MIN_ALNS:
 			ambiguous += 1
 			multimodal[pos] = float(covs[1]) / covs[0]
 
+	for pos, covs_dict in pos_distribution.items():
+		covs_dict = dict(filter(lambda i: i[1] > 2, covs_dict.items()))
+		pos_distribution[pos] = covs_dict
+
 	x, y = get_signal(multimodal)
 	lmx, lmy = get_local_maxima(y)
-	plot_multimodal_read_distr(x, y, lmx, lmy)
-
-	# We calculate the scaled entropy. 
+	# We calculate the scaled entropy.
 	# The higher the entropy, the more versatile the reads aligned
-	# to that location. 
+	# to that location.
 	# We scale the entropy with the number of alignments to that position,
 	# since we also want it to indicate whether there were many or few
 	# alignments involved.
-	entropy = get_entropy(pos_distribution, scaled=True)
-	plab.plot(entropy, 'g')
+	entropy = get_entropy(pos_distribution, scaled=False)
+	plot_multimodal_read_distr(x, y, lmx, lmy, entropy)
+
+	# plab.legend('2nd/1st ratio', 'local maxima', 'scaled entropy')
 
 	for loc in lmx:
 		print "LOC %4d: ENTROPY: %1.4f, TOTAL READS: %d, SEC/FIRST: %1.4f" % (loc, entropy[loc], sum(pos_distribution[loc].values()), multimodal[loc])
+
+	# Extract the reads that have aligned to these 2-modal positions
+	# into separate files.
+	#create_reads_bam_files(lmx, bam_in)
+
+	# Create a file with two most numerous reads for each
+	# of the bimodal locations
+	write_2_numerous(lmx, pos_distribution)
+
+	#plt.savefig('2modal_alns.png')
+
+	msr = max(second_reads)
+	mfr = max(first_reads)
+	second_reads = map(lambda x: float(x) / mfr, second_reads)
+	first_reads = map(lambda x: float(x) / mfr, first_reads)
+	plab.figure()
+	plab.plot(first_reads)
+	plab.hold(True)
+	plab.plot(second_reads, 'g')
 
 	plab.show()
 
